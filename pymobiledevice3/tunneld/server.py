@@ -117,40 +117,45 @@ class TunneldCore:
         try:
             previous_ips = []
             while True:
-                current_ips = OSUTILS.get_ipv6_ips()
-                added = [ip for ip in current_ips if ip not in previous_ips]
-                removed = [ip for ip in previous_ips if ip not in current_ips]
+                try:
+                    current_ips = OSUTILS.get_ipv6_ips()
+                    added = [ip for ip in current_ips if ip not in previous_ips]
+                    removed = [ip for ip in previous_ips if ip not in current_ips]
 
-                previous_ips = current_ips
+                    previous_ips = current_ips
 
-                # logger.debug(f'added interfaces: {added}')
-                # logger.debug(f'removed interfaces: {removed}')
+                    # logger.debug(f'added interfaces: {added}')
+                    # logger.debug(f'removed interfaces: {removed}')
 
-                for ip in removed:
-                    if ip in self.tunnel_tasks:
-                        self.tunnel_tasks[ip].task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await self.tunnel_tasks[ip].task
+                    for ip in removed:
+                        if ip in self.tunnel_tasks:
+                            self.tunnel_tasks[ip].task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await self.tunnel_tasks[ip].task
 
-                if added:
-                    # A new interface was attached
-                    for answer in await browse_remoted():
-                        for address in answer.addresses:
-                            if address.iface.startswith("utun"):
-                                # Skip already established tunnels
-                                continue
-                            if address.full_ip in self.tunnel_tasks:
-                                # Skip already established tunnels
-                                continue
-                            self.tunnel_tasks[address.full_ip] = TunnelTask(
-                                task=asyncio.create_task(
-                                    self.handle_new_potential_usb_cdc_ncm_interface_task(address.full_ip),
-                                    name=f"handle-new-potential-usb-cdc-ncm-interface-task-{address.full_ip}",
+                    if added:
+                        # A new interface was attached
+                        for answer in await browse_remoted():
+                            for address in answer.addresses:
+                                if address.iface.startswith("utun"):
+                                    # Skip already established tunnels
+                                    continue
+                                if address.full_ip in self.tunnel_tasks:
+                                    # Skip already established tunnels
+                                    continue
+                                self.tunnel_tasks[address.full_ip] = TunnelTask(
+                                    task=asyncio.create_task(
+                                        self.handle_new_potential_usb_cdc_ncm_interface_task(address.full_ip),
+                                        name=f"handle-new-potential-usb-cdc-ncm-interface-task-{address.full_ip}",
+                                    )
                                 )
-                            )
 
-                # wait before re-iterating
-                await asyncio.sleep(1)
+                    # wait before re-iterating
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(f"Got exception from {asyncio.current_task().get_name()}")
         except asyncio.CancelledError:
             pass
 
@@ -212,6 +217,7 @@ class TunneldCore:
                             GetProhibitedError,
                             construct.core.StreamError,
                             ConnectionAbortedError,
+                            ConnectionResetError,
                             DeviceNotFoundError,
                             LockdownError,
                             IncorrectModeError,
@@ -231,6 +237,10 @@ class TunneldCore:
                     # This is exception is expected to occur repeatedly on linux running usbmuxd
                     # as long as there isn't any physical iDevice connected
                     logger.debug("failed to connect to usbmux. waiting for it to restart")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(f"Got exception from {asyncio.current_task().get_name()}")
                 finally:
                     await asyncio.sleep(USBMUX_INTERVAL)
         except asyncio.CancelledError:
@@ -240,28 +250,39 @@ class TunneldCore:
     async def monitor_mobdev2_task(self) -> None:
         try:
             while True:
-                async for ip, lockdown in get_mobdev2_lockdowns(only_paired=True):
-                    with lockdown:
-                        udid = lockdown.udid
-                        task_identifier = f"mobdev2-{udid}-{ip}"
-                        if self.tunnel_exists_for_udid(udid):
-                            # Skip tunnel if already exists for this udid
-                            continue
-                        if task_identifier in self.tunnel_tasks:
-                            # Skip if already trying to establish a tunnel for this device
-                            continue
-                        try:
-                            tunnel_service = await CoreDeviceTunnelProxy.create(lockdown)
-                        except InvalidServiceError:
-                            logger.warning(f"[{task_identifier}] failed to start CoreDeviceTunnelProxy - skipping")
-                            continue
-                    self.tunnel_tasks[task_identifier] = TunnelTask(
-                        task=asyncio.create_task(
-                            self.start_tunnel_task(task_identifier, tunnel_service),
-                            name=f"start-tunnel-task-{task_identifier}",
-                        ),
-                        udid=udid,
-                    )
+                try:
+                    async for ip, lockdown in get_mobdev2_lockdowns(only_paired=True):
+                        with lockdown:
+                            udid = lockdown.udid
+                            task_identifier = f"mobdev2-{udid}-{ip}"
+                            if self.tunnel_exists_for_udid(udid):
+                                # Skip tunnel if already exists for this udid
+                                continue
+                            if task_identifier in self.tunnel_tasks:
+                                # Skip if already trying to establish a tunnel for this device
+                                continue
+                            try:
+                                tunnel_service = await CoreDeviceTunnelProxy.create(lockdown)
+                            except (
+                                InvalidServiceError,
+                                ConnectionResetError,
+                                ConnectionAbortedError,
+                                LockdownError,
+                                MuxException,
+                            ):
+                                logger.debug(f"[{task_identifier}] failed to start CoreDeviceTunnelProxy - skipping")
+                                continue
+                        self.tunnel_tasks[task_identifier] = TunnelTask(
+                            task=asyncio.create_task(
+                                self.start_tunnel_task(task_identifier, tunnel_service),
+                                name=f"start-tunnel-task-{task_identifier}",
+                            ),
+                            udid=udid,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(f"Got exception from {asyncio.current_task().get_name()}")
                 await asyncio.sleep(MOBDEV2_INTERVAL)
         except asyncio.CancelledError:
             pass
