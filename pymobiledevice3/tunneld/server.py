@@ -34,6 +34,7 @@ from pymobiledevice3.exceptions import (
     InvalidServiceError,
     LockdownError,
     MuxException,
+    NotPairedError,
     PairingError,
     StreamClosedError,
 )
@@ -213,9 +214,9 @@ class TunneldCore:
                         try:
                             with create_using_usbmux(mux_device.serial, autopair=self.autopair) as lockdown:
                                 service = await CoreDeviceTunnelProxy.create(lockdown)
-                        except PairingError:
+                        except (PairingError, NotPairedError):
                             logger.warning(
-                                f"Skipping device {mux_device.serial}: pairing dialog required"
+                                f"Skipping device {mux_device.serial}: device is not paired"
                             )
                             if service is not None:
                                 await service.close()
@@ -584,7 +585,7 @@ class TunneldRunner:
                         )
                         self._tunneld_core.tunnel_tasks[task_identifier] = TunnelTask(task=task, udid=udid)
                         created_task = True
-                    except (ConnectionFailedError, InvalidServiceError, MuxException, PairingError):
+                    except (ConnectionFailedError, InvalidServiceError, MuxException, PairingError, NotPairedError):
                         pass
                 if connection_type in ("usb", None):
                     for rsd in await get_rsds(udid=udid):
