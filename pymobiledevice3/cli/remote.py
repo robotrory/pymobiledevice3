@@ -95,6 +95,7 @@ def cli_tunneld(
     wifi: Annotated[bool, typer.Option(help="Enable WiFi monitoring")] = True,
     usbmux: Annotated[bool, typer.Option(help="Enable usbmux monitoring")] = True,
     mobdev2: Annotated[bool, typer.Option(help="Enable mobdev2 monitoring")] = True,
+    autopair: Annotated[bool, typer.Option(help="Enable auto-pairing with devices")] = False,
 ) -> None:
     """Start Tunneld service for remote tunneling"""
     if not verify_tunnel_imports():
@@ -108,6 +109,7 @@ def cli_tunneld(
         wifi_monitor=wifi,
         usbmux_monitor=usbmux,
         mobdev2_monitor=mobdev2,
+        autopair=autopair,
     )
     if daemonize:
         try:

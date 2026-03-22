@@ -80,6 +80,7 @@ class TunneldCore:
         usb_monitor: bool = True,
         usbmux_monitor: bool = True,
         mobdev2_monitor: bool = True,
+        autopair: bool = False,
     ) -> None:
         self.protocol = protocol
         self.tasks: list[asyncio.Task] = []
@@ -88,6 +89,7 @@ class TunneldCore:
         self.wifi_monitor = wifi_monitor
         self.usbmux_monitor = usbmux_monitor
         self.mobdev2_monitor = mobdev2_monitor
+        self.autopair = autopair
 
     def start(self) -> None:
         """Register all tasks"""
@@ -209,8 +211,15 @@ class TunneldCore:
                             continue
                         service = None
                         try:
-                            with create_using_usbmux(mux_device.serial) as lockdown:
+                            with create_using_usbmux(mux_device.serial, autopair=self.autopair) as lockdown:
                                 service = await CoreDeviceTunnelProxy.create(lockdown)
+                        except PairingError:
+                            logger.warning(
+                                f"Skipping device {mux_device.serial}: pairing dialog required"
+                            )
+                            if service is not None:
+                                await service.close()
+                            continue
                         except (
                             MuxException,
                             InvalidServiceError,
@@ -384,7 +393,9 @@ class TunneldCore:
                 raise asyncio.CancelledError()
 
             await asyncio.create_task(
-                self.start_tunnel_task(ip, await create_core_device_tunnel_service_using_rsd(rsd)),
+                self.start_tunnel_task(
+                    ip, await create_core_device_tunnel_service_using_rsd(rsd, autopair=self.autopair)
+                ),
                 name=f"start-tunnel-task-usb-{ip}",
             )
         except asyncio.CancelledError:
@@ -450,6 +461,7 @@ class TunneldRunner:
         wifi_monitor: bool = True,
         usbmux_monitor: bool = True,
         mobdev2_monitor: bool = True,
+        autopair: bool = False,
     ) -> None:
         cls(
             host,
@@ -459,6 +471,7 @@ class TunneldRunner:
             wifi_monitor=wifi_monitor,
             usbmux_monitor=usbmux_monitor,
             mobdev2_monitor=mobdev2_monitor,
+            autopair=autopair,
         )._run_app()
 
     def __init__(
@@ -470,6 +483,7 @@ class TunneldRunner:
         wifi_monitor: bool = True,
         usbmux_monitor: bool = True,
         mobdev2_monitor: bool = True,
+        autopair: bool = False,
     ):
         @asynccontextmanager
         async def lifespan(app: FastAPI):
@@ -488,6 +502,7 @@ class TunneldRunner:
             usb_monitor=usb_monitor,
             usbmux_monitor=usbmux_monitor,
             mobdev2_monitor=mobdev2_monitor,
+            autopair=autopair,
         )
 
         @self._app.get("/")
@@ -557,7 +572,9 @@ class TunneldRunner:
                 if not created_task and connection_type in ("usbmux", None):
                     task_identifier = f"usbmux-{udid}"
                     try:
-                        with create_using_usbmux(udid) as lockdown:
+                        with create_using_usbmux(
+                            udid, autopair=self._tunneld_core.autopair
+                        ) as lockdown:
                             service = await CoreDeviceTunnelProxy.create(lockdown)
                         task = asyncio.create_task(
                             self._tunneld_core.start_tunnel_task(
@@ -567,7 +584,7 @@ class TunneldRunner:
                         )
                         self._tunneld_core.tunnel_tasks[task_identifier] = TunnelTask(task=task, udid=udid)
                         created_task = True
-                    except (ConnectionFailedError, InvalidServiceError, MuxException):
+                    except (ConnectionFailedError, InvalidServiceError, MuxException, PairingError):
                         pass
                 if connection_type in ("usb", None):
                     for rsd in await get_rsds(udid=udid):
@@ -577,7 +594,11 @@ class TunneldRunner:
                             continue
                         task = asyncio.create_task(
                             self._tunneld_core.start_tunnel_task(
-                                rsd_ip, await create_core_device_tunnel_service_using_rsd(rsd), queue=queue
+                                rsd_ip,
+                                await create_core_device_tunnel_service_using_rsd(
+                                    rsd, autopair=self._tunneld_core.autopair
+                                ),
+                                queue=queue,
                             ),
                             name=f"start-tunnel-usb-{rsd_ip}",
                         )
